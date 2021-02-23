@@ -1211,10 +1211,15 @@ Value& Value::resolveReference(char const* key, char const* end)
 	JSON_ASSERT_MESSAGE(
 			type() == nullValue || type() == objectValue,
 			"in Json::Value::resolveReference(key, end): requires objectValue");
+
+	// 默认是nullValue 默认创建一个objectValue
 	if (type() == nullValue)
 		*this = Value(objectValue);
+
+	// 包装字符串
 	CZString actualKey(key, static_cast<unsigned>(end - key),
 			CZString::duplicateOnCopy);
+	// TODO 为什么使用了lower_bound而不是find 使用find还不用考虑 (*it).first == actualKey
 	auto it = value_.map_->lower_bound(actualKey);
 	if (it != value_.map_->end() && (*it).first == actualKey)
 		return (*it).second;
@@ -1272,6 +1277,11 @@ Value const& Value::operator[](const String& key) const
 	return *found;
 }
 
+/**
+ * 经过转换后统一去调用resolveReference
+ * @param key
+ * @return
+ */
 Value& Value::operator[](const char* key)
 {
 	return resolveReference(key, key + strlen(key));
