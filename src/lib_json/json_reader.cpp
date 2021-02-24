@@ -1156,11 +1156,10 @@ bool OurReader::parse(const char* beginDoc, const char* endDoc, Value& root,
 	errors_.clear();
 	while (!nodes_.empty())
 		nodes_.pop();
-	nodes_.push(&root);
+	nodes_.push(&root); // 直接来看这里 第一次出现了root nodes->std::stack<Value*>
 
-	// skip byte order mark if it exists at the beginning of the UTF-8 text.
 	skipBom(features_.skipBom_);
-	bool successful = readValue();
+	bool successful = readValue(); // 在这里进行解析
 	nodes_.pop();
 	Token token;
 	skipCommentTokens(token);
@@ -1322,7 +1321,7 @@ bool OurReader::readToken(Token& token)
 	switch (c)
 	{
 	case '{':
-		token.type_ = tokenObjectBegin;
+		token.type_ = tokenObjectBegin; // 标识读到的是Object的开始
 		break;
 	case '}':
 		token.type_ = tokenObjectEnd;

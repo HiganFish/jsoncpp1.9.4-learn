@@ -1,4 +1,6 @@
-时隔1年再次回来阅读jsoncpp代码, 看看现在有什么收获. 所做的笔记能够多大的差距. 这次也是为了仿制出简陋版本的jsoncpp
+时隔1年再次回来阅读jsoncpp代码, 看看现在有什么收获. 
+
+昨天晚上发现了 https://github.com/Tencent/rapidjson 这就去看看 溜溜溜
 
 [2020年3月的笔记](https://github.com/HiganFish/JsoncppLearn)
 
@@ -79,9 +81,7 @@ Value& Value::resolveReference(char const* key, char const* end)
 }
 ```
 
-
-
- **为什么使用了`lower_bound`?  明明使用find还能避免掉if的第二个条件. **
+**为什么使用了`lower_bound`?  明明使用find还能避免掉if的第二个条件. **
 
 再往后看就能发现`insert`语句中再次使用了`it` 由于`lower_bound`返回的迭代器能够指导`insert`更加高效的插入的输入 所以这样写 而对于`find` 就算使用`insert`也会由于是`end`无法起到指导作用将会花费额外的`O(log N)`插入
 
@@ -262,3 +262,192 @@ void BuiltStyledStreamWriter::writeValue(Value const& value)
 }
 ```
 
+
+
+# string到Json对象的转换
+
+
+
+首先还是上官方的例子, 删去了一小部分代码
+
+```c++
+const std::string rawJson = R"({"Age": 20, "Name": "colin"})";
+const auto rawJsonLength = static_cast<int>(rawJson.length());
+
+JSONCPP_STRING err;
+Json::Value root;
+
+Json::CharReaderBuilder builder; // 工厂模式 用于加载配置类初始化CharReader
+const std::unique_ptr<Json::CharReader> reader(builder.newCharReader());
+
+// 通过 err来返回错误
+if (!reader->parse(rawJson.c_str(), rawJson.c_str() + rawJsonLength, &root,
+                   &err))
+{
+    std::cout << "error" << std::endl;
+    return EXIT_FAILURE;
+}
+```
+
+进入 parse函数
+
+```c++
+bool parse(char const* beginDoc, char const* endDoc, Value* root,
+			String* errs) override
+{
+    bool ok = reader_.parse(beginDoc, endDoc, *root, collectComments_);
+    if (errs)
+    {
+        *errs = reader_.getFormattedErrorMessages();
+    }
+    return ok;
+}
+```
+
+这个函数很有意思, 按照我开始的想法 errs应该是传入到了底层或者保存了指针, 然而 他是在解析完之后 读取错误... 
+
+继续进入parse函数
+
+```c++
+bool OurReader::parse(const char* beginDoc, const char* endDoc, Value& root,
+		bool collectComments)
+{
+	if (!features_.allowComments_)
+	{
+		collectComments = false;
+	}
+
+	begin_ = beginDoc; // 将字符串保存
+	end_ = endDoc;
+	collectComments_ = collectComments;
+	current_ = begin_;
+	lastValueEnd_ = nullptr;
+	lastValue_ = nullptr;
+	commentsBefore_.clear();
+	errors_.clear();
+	while (!nodes_.empty())
+		nodes_.pop();
+	nodes_.push(&root); // 直接来看这里 第一次出现了root nodes->std::stack<Value*>
+
+	skipBom(features_.skipBom_);
+	bool successful = readValue(); // 在这里进行解析
+	nodes_.pop();
+    ...
+	return successful;
+}
+```
+
+进入readValue函数
+
+```c++
+bool OurReader::readValue()
+{
+	//  To preserve the old behaviour we cast size_t to int.
+	if (nodes_.size() > features_.stackLimit_)
+		throwRuntimeError("Exceeded stackLimit in readValue().");
+	Token token;
+	skipCommentTokens(token); // 这里读取token token是通过读取下一个保存的字符 来判断接下来的数据类型 { 代表 tokenObjectBegin } 代表结束等等
+	bool successful = true;
+
+	if (collectComments_ && !commentsBefore_.empty())
+	{
+		currentValue().setComment(commentsBefore_, commentBefore);
+		commentsBefore_.clear();
+	}
+
+	switch (token.type_)
+	{
+	case tokenObjectBegin: // 第一次走这里
+		successful = readObject(token); 
+		currentValue().setOffsetLimit(current_ - begin_);
+		break;
+	case tokenNumber: // 然后这里读取了v  age对应的20
+		successful = decodeNumber(token);
+		break; 
+	case tokenString: // name对应的 colin
+		successful = decodeString(token);
+		break;
+	}
+	return successful;
+}
+```
+
+进入`readObject()`函数
+
+```c++
+bool OurReader::readObject(Token& token)
+{
+	Token tokenName;
+	String name;
+	Value init(objectValue);
+	currentValue().swapPayload(init);
+	currentValue().setOffsetStart(token.start_ - begin_);
+	while (readToken(tokenName)) // 再次读取token 这里读取到的是 "arg" 代表字符串的token 字符串的token为双引号开始 然后双引号结束
+	{
+		bool initialTokenOk = true;
+		if (tokenName.type_ == tokenString)
+		{
+			if (!decodeString(tokenName, name)) // 解析字符串 "age"转为了 age保存到了name之中 解析的时候调用了reserve扩充字符串cap
+				return recoverFromError(tokenObjectEnd);
+		}
+		else if (tokenName.type_ == tokenNumber && features_.allowNumericKeys_)
+		{
+			Value numberName;
+			if (!decodeNumber(tokenName, numberName))
+				return recoverFromError(tokenObjectEnd);
+			name = numberName.asString();
+		}
+		else
+		{
+			break;
+		}
+
+		if (features_.rejectDupKeys_ && currentValue().isMember(name)) // 读取到name后检测重复
+		{
+			String msg = "Duplicate key: '" + name + "'";
+			return addErrorAndRecover(msg, tokenName, tokenObjectEnd);
+		}
+
+		Token colon;
+		if (!readToken(colon) || colon.type_ != tokenMemberSeparator) // 去除掉 name后的 :
+		{
+			return addErrorAndRecover("Missing ':' after object member name", colon,
+					tokenObjectEnd);
+		}
+		Value& value = currentValue()[name];
+		nodes_.push(&value); // 接下来改解析这个name k对应的 v了 将其移动到栈顶
+        bool ok = readValue(); // 继续调用readValue 本例中对应的数字 解析数字 则是读取 char 然后 - '0' + num * 10 这种方式
+		nodes_.pop(); // 读取结束了value 出栈
+		if (!ok) // error already set
+			return recoverFromError(tokenObjectEnd);
+
+		Token comma;
+		if (!readToken(comma) || // 再次读取token 移除 ,
+				(comma.type_ != tokenObjectEnd && comma.type_ != tokenArraySeparator &&
+						comma.type_ != tokenComment))
+		{
+			return addErrorAndRecover("Missing ',' or '}' in object declaration",
+					comma, tokenObjectEnd);
+		}
+		bool finalizeTokenOk = true;
+		while (comma.type_ == tokenComment && finalizeTokenOk)
+			finalizeTokenOk = readToken(comma);
+		if (comma.type_ == tokenObjectEnd) // 这里会判断 是不是Object结束 不是则继续解析 如此反复 知道object解析结束
+			return true;
+	}
+	return addErrorAndRecover("Missing '}' or object member name", tokenName,
+			tokenObjectEnd);
+}
+```
+
+
+
+`parse`进行初始化, 然后调用`readValue`进行json的解析, 根据读取到的token 来决定`readValue` 的走向
+
+第一次需要读取到`{`标识Object的开始, 调用`readObject`
+
+`readObject`则是先读取到`k` 判断下有无重复 然后移除掉`:` 再次解析`v`. 然后再次读取token 这里简单来说需要是`, (标识一个kv的结束)`或者是`} (标识Object的结束)` 通过栈来控制当前解析的Value;
+
+
+
+预先压入了`root`然后读取到了`k`又压入了此`k`对应的Value  然后解析`v`结束后 出栈  栈中现在包含的就是预先压入的`root`了只不过这时候已经保存了一个`kv`了
